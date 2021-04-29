@@ -1,3 +1,8 @@
+-- SET @TEMP_LOG_BIN = @@SESSION.SQL_LOG_BIN;
+-- SET @@SESSION.SQL_LOG_BIN= 0;
+-- SET @TEMP_READ_ONLY = @@GLOBAL.READ_ONLY;
+-- SET @TEMP_SUPER_READ_ONLY = @@GLOBAL.SUPER_READ_ONLY;
+-- SET @@GLOBAL.READ_ONLY = 0;
 USE sys;
 
 
@@ -66,43 +71,53 @@ WHERE Channel_name = 'group_replication_applier' ), (SELECT
 @@global.GTID_EXECUTED) )));
 END$$
 
-CREATE FUNCTION gr_member_in_primary_partition()
-RETURNS VARCHAR(3)
-DETERMINISTIC
-BEGIN
-  RETURN (SELECT IF( MEMBER_STATE='ONLINE' AND ((SELECT COUNT(*) FROM
-performance_schema.replication_group_members WHERE MEMBER_STATE != 'ONLINE') >=
-((SELECT COUNT(*) FROM performance_schema.replication_group_members)/2) = 0),
-'YES', 'NO' ) FROM performance_schema.replication_group_members JOIN
-performance_schema.replication_group_member_stats rgms USING(member_id) WHERE rgms.MEMBER_ID=@@SERVER_UUID )  ;
-END$$
-
 CREATE FUNCTION gr_transactions_to_cert() RETURNS int(11)
     DETERMINISTIC
 BEGIN
   RETURN (select  performance_schema.replication_group_member_stats.COUNT_TRANSACTIONS_IN_QUEUE AS transactions_to_cert
     FROM
-        performance_schema.replication_group_member_stats where MEMBER_ID=@@SERVER_UUID )  ;
+        performance_schema.replication_group_member_stats where MEMBER_ID=@@SERVER_UUID );
 END$$
 
-CREATE VIEW gr_member_routing_candidate_status AS
+CREATE FUNCTION my_server_uuid() RETURNS TEXT(36) DETERMINISTIC NO SQL RETURN (SELECT @@global.server_uuid as my_id);$$
 
-SELECT 
-        sys.gr_member_in_primary_partition() AS viable_candidate,
-        IF((SELECT 
-                    ((SELECT 
+CREATE VIEW gr_member_routing_candidate_status AS
+    SELECT
+        IFNULL((SELECT
+                        IF(MEMBER_STATE = 'ONLINE'
+                                    AND ((SELECT
+                                        COUNT(*)
+                                    FROM
+                                        performance_schema.replication_group_members
+                                    WHERE
+                                        MEMBER_STATE != 'ONLINE') >= ((SELECT
+                                        COUNT(*)
+                                    FROM
+                                        performance_schema.replication_group_members) / 2) = 0),
+                                'YES',
+                                'NO')
+                    FROM
+                        performance_schema.replication_group_members
+                            JOIN
+                        performance_schema.replication_group_member_stats rgms USING (member_id)
+                    WHERE
+                        rgms.MEMBER_ID = my_server_uuid()),
+                'NO') AS viable_candidate,
+        IF((SELECT
+                    ((SELECT
                                 GROUP_CONCAT(performance_schema.global_variables.VARIABLE_VALUE
                                         SEPARATOR ',')
                             FROM
                                 performance_schema.global_variables
                             WHERE
                                 (performance_schema.global_variables.VARIABLE_NAME IN ('read_only' , 'super_read_only'))) <> 'OFF,OFF')
-                           
                 ),
             'YES',
             'NO') AS read_only,
-        sys.gr_applier_queue_length() AS transactions_behind,
-        sys.gr_transactions_to_cert() AS transactions_to_cert;$$
+        IFNULL(sys.gr_applier_queue_length(), 0) AS transactions_behind,
+        IFNULL(sys.gr_transactions_to_cert(), 0) AS transactions_to_cert;$$
 
 DELIMITER ;
-
+-- SET @@SESSION.SQL_LOG_BIN = @TEMP_LOG_BIN;
+-- SET @@GLOBAL.READ_ONLY = @TEMP_READ_ONLY;
+-- SET @@GLOBAL.SUPER_READ_ONLY = @TEMP_SUPER_READ_ONLY;
